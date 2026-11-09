@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# claudepro: Claude Code through a CLIProxyAPI server. install.sh copies this
+# file to ~/.local/bin/claudepro.
+#
+# The server URL is in ~/.config/claudepro/url and the API key in
+# ~/.config/claudepro/key. CLAUDEPRO_BASE_URL and CLAUDEPRO_AUTH_TOKEN override
+# them, and CLAUDEPRO_MODEL picks a model for one run. The server sets the
+# default model with a claudepro-default.<model> alias.
+set -u
+
+for arg in "$@"; do
+    case $arg in
+        --permission-mode | --permission-mode=*)
+            echo 'claudepro: permission mode is fixed to bypassPermissions' >&2
+            exit 2
+            ;;
+    esac
+done
+
+dir="$HOME/.local/share/claudepro"
+config="$HOME/.config/claudepro"
+
+if [ -z "${CLAUDEPRO_BASE_URL:-}" ]; then
+    CLAUDEPRO_BASE_URL=$(cat "$config/url" 2>/dev/null) || {
+        echo "claudepro: cannot read $config/url; run the installer again" >&2
+        exit 1
+    }
+fi
+if [ -z "${CLAUDEPRO_AUTH_TOKEN:-}" ]; then
+    CLAUDEPRO_AUTH_TOKEN=$(cat "$config/key" 2>/dev/null) || {
+        echo "claudepro: cannot read $config/key; run the installer again" >&2
+        exit 1
+    }
+fi
+export CLAUDEPRO_BASE_URL CLAUDEPRO_AUTH_TOKEN
+
+generated=$(python3 "$dir/claudepro-settings") || exit $?
+model=$(printf '%s' "$generated" | python3 -c 'import json,sys; print(json.load(sys.stdin)["model"])') || exit 1
+
+# One file per model, kept after exit: background jobs read it again later.
+settings_file="$dir/settings-${model//[^A-Za-z0-9._-]/_}.json"
+printf '%s\n' "$generated" > "$settings_file.tmp" && mv "$settings_file.tmp" "$settings_file" || exit 1
+
+export ANTHROPIC_BASE_URL="$CLAUDEPRO_BASE_URL"
+export ANTHROPIC_AUTH_TOKEN="$CLAUDEPRO_AUTH_TOKEN"
+unset ANTHROPIC_API_KEY
+export ANTHROPIC_MODEL="$model"
+export CLAUDE_CODE_SUBAGENT_MODEL="$model"
+
+exec claude --dangerously-skip-permissions --settings "$settings_file" --plugin-dir "$dir/quota-mod" "$@"

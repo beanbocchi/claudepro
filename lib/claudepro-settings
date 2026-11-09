@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
+
+
+# The server sets the default model with an alias named
+# "claudepro-default.<model id>" (oauth.model-alias in its config.yaml).
+SERVER_DEFAULT_PREFIX = "claudepro-default."
+
+
+class DiscoveryError(Exception):
+    pass
+
+
+def fetch_models():
+    base_url = os.environ.get("CLAUDEPRO_BASE_URL", "http://127.0.0.1:8317").rstrip("/")
+    token = os.environ.get("CLAUDEPRO_AUTH_TOKEN", "")
+    parsed = urlsplit(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise DiscoveryError("CLAUDEPRO_BASE_URL must be an http(s) URL")
+    if not token:
+        raise DiscoveryError("CLAUDEPRO_AUTH_TOKEN is empty")
+
+    request = Request(
+        f"{base_url}/v1/models",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+    except HTTPError as error:
+        raise DiscoveryError(f"proxy returned HTTP {error.code}") from None
+    except URLError as error:
+        reason = getattr(error, "reason", error)
+        raise DiscoveryError(f"cannot reach proxy: {reason}") from None
+    except (TimeoutError, OSError):
+        raise DiscoveryError("proxy request failed") from None
+    except json.JSONDecodeError:
+        raise DiscoveryError("proxy returned invalid JSON") from None
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise DiscoveryError("proxy response has no model list")
+
+    models = []
+    seen = set()
+    for item in payload["data"]:
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("id")
+        if not isinstance(model_id, str) or not model_id or model_id.strip() != model_id:
+            continue
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        owner = item.get("owned_by")
+        if not isinstance(owner, str) or not owner:
+            owner = item.get("description")
+        models.append((model_id, owner if isinstance(owner, str) else ""))
+
+    if not models:
+        raise DiscoveryError("proxy returned an empty model list")
+    return models
+
+
+def behaves_as(model_id):
+    model_id = model_id.lower()
+    if "haiku" in model_id:
+        return "claude-haiku-5-5"
+    if "sonnet" in model_id:
+        return "claude-sonnet-5-5"
+    return "claude-opus-5-5"
+
+
+def main():
+    models = fetch_models()
+    aliases = [model_id for model_id, _ in models if model_id.startswith(SERVER_DEFAULT_PREFIX)]
+    models = [(model_id, owner) for model_id, owner in models if model_id not in aliases]
+    model_ids = {model_id for model_id, _ in models}
+    server_default = next(
+        (alias[len(SERVER_DEFAULT_PREFIX):] for alias in aliases if alias[len(SERVER_DEFAULT_PREFIX):] in model_ids),
+        None,
+    )
+    requested = os.environ.get("CLAUDEPRO_MODEL", "").strip()
+    if requested:
+        if requested not in model_ids:
+            raise DiscoveryError(f"CLAUDEPRO_MODEL is not in the proxy catalog: {requested}")
+        default_model = requested
+    elif server_default:
+        default_model = server_default
+    elif "claude-opus-5-5" in model_ids:
+        default_model = "claude-opus-5-5"
+    elif "gpt-6-luna" in model_ids:
+        default_model = "gpt-6-luna"
+    else:
+        default_model = sorted(
+            (model_id for model_id in model_ids if "image" not in model_id.lower())
+        )[0] if any("image" not in model_id.lower() for model_id in model_ids) else sorted(model_ids)[0]
+        print(f"claudepro: the server sets no default and claude-opus-5-5 and gpt-6-luna are unavailable; defaulting to {default_model}", file=sys.stderr)
+
+    options = []
+    for model_id, owner in models:
+        option = {
+            "model": model_id,
+            "label": model_id,
+            "behavesAs": behaves_as(model_id),
+        }
+        if owner:
+            option["description"] = owner
+        options.append(option)
+
+    json.dump(
+        {
+            "model": default_model,
+            "modelPicker": {
+                "options": options,
+                "replaceBuiltInOptions": True,
+            },
+        },
+        sys.stdout,
+        ensure_ascii=False,
+        indent=2,
+    )
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except DiscoveryError as error:
+        print(f"claudepro: {error}", file=sys.stderr)
+        sys.exit(1)
