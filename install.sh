@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Installs the claudepro command on Linux and macOS:
+# Installs agentpro, the claudepro and codexpro commands, on Linux and macOS:
 #
-#   curl -fsSL https://raw.githubusercontent.com/beanbocchi/claudepro/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/beanbocchi/agentpro/main/install.sh | bash
 #
 # It asks for the API key, checks it against the server, and writes
 #   ~/.config/claudepro/{url,key}
-#   ~/.local/share/claudepro/{claudepro-settings,quota-mod/}
-#   ~/.local/bin/claudepro
+#   ~/.local/share/claudepro/{claudepro-settings,quota-mod/,image-mod/}
+#   ~/.local/bin/{claudepro,codexpro}
 # It installs Claude Code if `claude` is missing. Run it again to update.
 #
 # CLAUDEPRO_KEY and CLAUDEPRO_URL skip the prompt and the default server.
 set -euo pipefail
 
 DEFAULT_URL=http://khoakomlem-internal.ddns.net:8317
-TARBALL=https://codeload.github.com/beanbocchi/claudepro/tar.gz/refs/heads/main
+TARBALL=https://codeload.github.com/beanbocchi/agentpro/tar.gz/refs/heads/main
 tmp=''
 
 fail() {
@@ -71,6 +71,9 @@ main() {
     rm -rf "$share/quota-mod"
     cp -R "$src/quota-mod" "$share/quota-mod"
     rm -rf "$share/quota-mod/tests"
+    rm -rf "$share/image-mod"
+    cp -R "$src/image-mod" "$share/image-mod"
+    rm -rf "$share/image-mod/tests"
     python3 - "$url" "$config/key" "$share/quota-mod/quota.json" <<'EOF'
 import json, os, sys
 from urllib.parse import urlsplit
@@ -80,6 +83,7 @@ with open(out, "w") as f:
     json.dump({"url": quota, "keyFile": key_file}, f)
 EOF
     install -m 755 "$src/bin/claudepro" "$bindir/claudepro"
+    install -m 755 "$src/bin/codexpro" "$bindir/codexpro"
 
     if ! command -v claude >/dev/null && [ ! -x "$bindir/claude" ]; then
         echo 'Claude Code is not installed. Installing it ...'
@@ -87,7 +91,8 @@ EOF
     fi
 
     echo
-    echo "Installed $bindir/claudepro"
+    echo "Installed $bindir/claudepro and $bindir/codexpro"
+    command -v codex >/dev/null || echo 'codexpro needs Codex CLI, which is not installed: https://github.com/openai/codex'
     case ":$PATH:" in
         *":$bindir:"*) ;;
         *)
@@ -102,7 +107,8 @@ EOF
     if [ -f "$HOME/.config/fish/functions/claudepro.fish" ]; then
         echo "Note: fish runs the function in ~/.config/fish/functions/claudepro.fish before $bindir/claudepro."
     fi
-    echo 'Run: claudepro    (/quota inside it shows the accounts'"'"' plan limits)'
+    echo 'Run: claudepro    (Claude Code, Claude models first; /quota inside it shows the accounts'"'"' plan limits)'
+    echo '     codexpro     (Codex CLI, GPT models first)'
 }
 
 main "$@"

@@ -8,7 +8,16 @@ from urllib.request import Request, urlopen
 
 
 # The server sets the default model with an alias named
-# "claudepro-default.<model id>" (oauth.model-alias in its config.yaml).
+# "claudepro-default.<model id>" (oauth.model-alias in its config.yaml), and
+# codexpro's with "codexpro-default.<model id>".
+#
+# With no argument this prints the Claude Code settings for claudepro. With
+# --codex BUNDLED CATALOG it reads `codex debug models --bundled` output from
+# BUNDLED, writes codexpro's model_catalog_json to CATALOG, and prints
+# {"model": <model to pass to Codex, or null to leave Codex's own choice>}.
+# Both list every chat model the server offers: claudepro with the Claude models
+# first, codexpro with the GPT ones. Neither pins a model unless CLAUDEPRO_MODEL,
+# CODEXPRO_MODEL or a server alias names one.
 SERVER_DEFAULT_PREFIX = "claudepro-default."
 
 
@@ -75,31 +84,177 @@ def behaves_as(model_id):
     return "claude-opus-5-5"
 
 
-def main():
-    models = fetch_models()
-    aliases = [model_id for model_id, _ in models if model_id.startswith(SERVER_DEFAULT_PREFIX)]
-    models = [(model_id, owner) for model_id, owner in models if model_id not in aliases]
+# Models neither harness can talk to: image, audio and video generation,
+# embeddings, and Codex's internal reviewer.
+UNUSABLE = ("image", "video", "audio", "tts", "embed", "transcri", "realtime", "moderation",
+            "dall-e", "sora", "whisper", "auto-review")
+
+# Lines within a family, largest first. GPT names grow from luna (moon) to astra (stars).
+TIERS = {
+    "claude": ("fable", "opus", "sonnet", "haiku"),
+    "gpt": ("astra", "sol", "terra", "luna"),
+}
+
+
+def family(model_id, owner):
+    if owner == "anthropic" or model_id.startswith("claude-"):
+        return "claude"
+    if model_id.startswith("gpt-"):
+        return "gpt"
+    return "other"
+
+
+def usable(model_id):
+    return not any(word in model_id.lower() for word in UNUSABLE)
+
+
+def sort_key(model_id, owner, first):
+    """Orders by family (the harness's own first), then generation, then tier.
+
+    The generation is the major version; within it the bigger tier comes
+    first, then the newer minor version: claude-fable-5-2, claude-opus-5-5,
+    claude-sonnet-5-5, ..., claude-opus-4-8. Eight-digit dates are not versions.
+    """
+    fam = family(model_id, owner)
+    words = model_id.lower().replace(".", "-").split("-")
+    numbers = [int(w) for w in words if w.isdigit() and len(w) < 8]
+    major, minor = (numbers + [0, 0])[:2]
+    tiers = TIERS.get(fam, ())
+    tier = next((i for i, name in enumerate(tiers) if name in words), len(tiers))
+    family_rank = 0 if fam == first else 1 if fam in TIERS else 2
+    return (family_rank, -major, tier, -minor, model_id)
+
+
+HARNESSES = {
+    "claude": {"name": "claudepro", "env": "CLAUDEPRO_MODEL", "prefix": SERVER_DEFAULT_PREFIX,
+               "first": "claude"},
+    "codex": {"name": "codexpro", "env": "CODEXPRO_MODEL", "prefix": "codexpro-default.",
+              "first": "gpt"},
+}
+harness = HARNESSES["claude"]
+
+
+def choose(models):
+    """Returns the usable models in picker order, and the model the person or
+    the server chose: CLAUDEPRO_MODEL / CODEXPRO_MODEL, else the server's
+    claudepro-default. / codexpro-default. alias, else None."""
+    prefixes = tuple(h["prefix"] for h in HARNESSES.values())
+    aliases = [model_id for model_id, _ in models if model_id.startswith(prefixes)]
+    models = [(model_id, owner) for model_id, owner in models if model_id not in aliases and usable(model_id)]
+    if not models:
+        raise DiscoveryError("the proxy lists no chat models")
+    models.sort(key=lambda m: sort_key(*m, harness["first"]))
     model_ids = {model_id for model_id, _ in models}
-    server_default = next(
-        (alias[len(SERVER_DEFAULT_PREFIX):] for alias in aliases if alias[len(SERVER_DEFAULT_PREFIX):] in model_ids),
-        None,
-    )
-    requested = os.environ.get("CLAUDEPRO_MODEL", "").strip()
+    requested = os.environ.get(harness["env"], "").strip()
     if requested:
         if requested not in model_ids:
-            raise DiscoveryError(f"CLAUDEPRO_MODEL is not in the proxy catalog: {requested}")
-        default_model = requested
-    elif server_default:
-        default_model = server_default
-    elif "claude-opus-5-5" in model_ids:
-        default_model = "claude-opus-5-5"
-    elif "gpt-6-luna" in model_ids:
-        default_model = "gpt-6-luna"
-    else:
-        default_model = sorted(
-            (model_id for model_id in model_ids if "image" not in model_id.lower())
-        )[0] if any("image" not in model_id.lower() for model_id in model_ids) else sorted(model_ids)[0]
-        print(f"claudepro: the server sets no default and claude-opus-5-5 and gpt-6-luna are unavailable; defaulting to {default_model}", file=sys.stderr)
+            raise DiscoveryError(f"{harness['env']} is not a chat model in the proxy catalog: {requested}")
+        return models, requested
+    prefix = harness["prefix"]
+    return models, next(
+        (alias[len(prefix):] for alias in aliases if alias.startswith(prefix) and alias[len(prefix):] in model_ids),
+        None,
+    )
+
+
+# Codex fills /model from model_catalog_json. A GPT model Codex ships keeps its
+# own entry. Any other model gets a copy of gpt-5.5's entry (the last one without
+# GPT-only tool modes), with what only OpenAI's servers offer turned off.
+TEMPLATE_SLUG = "gpt-5.5"
+CLAUDE_OVERRIDES = {
+    "tool_mode": None,
+    "use_responses_lite": False,
+    "service_tiers": [],
+    "additional_speed_tiers": [],
+    "availability_nux": None,
+    "upgrade": None,
+    "experimental_supported_tools": [],
+    "multi_agent_version": None,
+    "supports_search_tool": False,
+    "support_verbosity": False,
+    "context_window": 200000,
+    "max_context_window": 200000,
+    "default_reasoning_level": "medium",
+}
+
+
+def codex_catalog(models, bundled):
+    shipped = {entry["slug"]: entry for entry in bundled.get("models", []) if isinstance(entry, dict) and "slug" in entry}
+    template = shipped.get(TEMPLATE_SLUG) or next(iter(shipped.values()), None)
+    if template is None:
+        raise DiscoveryError("codex debug models printed no models")
+    entries = []
+    for priority, (model_id, owner) in enumerate(models, start=1):
+        if model_id in shipped:
+            entry = dict(shipped[model_id])
+        else:
+            entry = dict(template, slug=model_id, display_name=model_id, description=f"{owner or 'Model'} on the claudepro server")
+            entry.pop("comp_hash", None)
+            if family(model_id, owner) != "gpt":
+                entry.update(CLAUDE_OVERRIDES)
+                entry["supported_reasoning_levels"] = [
+                    level for level in template.get("supported_reasoning_levels", []) if level.get("effort") in ("low", "medium", "high")
+                ]
+        entry["priority"] = priority
+        entry["visibility"] = "list"
+        entries.append(entry)
+    return {"models": entries}
+
+
+def codex_default(models, bundled):
+    """The model Codex itself starts on: of the listed models it ships, the one
+    with the lowest priority. Codex picks the lowest priority of whatever catalog
+    it reads, so codexpro passes this one on explicitly, or Codex would start on
+    the first model of the reordered catalog."""
+    offered = {model_id for model_id, _ in models}
+    shipped = [
+        entry for entry in bundled.get("models", [])
+        if isinstance(entry, dict) and entry.get("slug") in offered and entry.get("visibility") == "list"
+    ]
+    if shipped:
+        return min(shipped, key=lambda entry: entry.get("priority", 1 << 30))["slug"]
+    return models[0][0]
+
+
+def codex_config_picks_model(config_path):
+    """True when codex-home/config.toml has a top-level `model`, which Codex
+    writes when the person picks one in /model."""
+    try:
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("["):
+                    return False
+                if line.split("=", 1)[0].strip() == "model" and "=" in line:
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def main():
+    global harness
+    args = sys.argv[1:]
+    if args[:1] == ["--codex"]:
+        harness = HARNESSES["codex"]
+        if len(args) != 3:
+            raise DiscoveryError("usage: claudepro-settings --codex <codex debug models output> <catalog to write>")
+    models, default_model = choose(fetch_models())
+    if harness["name"] == "codexpro":
+        try:
+            with open(args[1]) as f:
+                bundled = json.load(f)
+        except (OSError, json.JSONDecodeError) as error:
+            raise DiscoveryError(f"cannot read the Codex model catalog {args[1]}: {error}") from None
+        catalog = codex_catalog(models, bundled)
+        with open(args[2] + ".tmp", "w") as f:
+            json.dump(catalog, f)
+        os.replace(args[2] + ".tmp", args[2])
+        if default_model is None and not codex_config_picks_model(os.path.join(os.path.dirname(args[2]), "config.toml")):
+            default_model = codex_default(models, bundled)
+        json.dump({"model": default_model}, sys.stdout)
+        sys.stdout.write("\n")
+        return
 
     options = []
     for model_id, owner in models:
@@ -112,14 +267,16 @@ def main():
             option["description"] = owner
         options.append(option)
 
+    # The built-in rows (Default, Opus, Sonnet, ...) stay: their aliases move to
+    # the newest model with each Claude Code release. Claude Code skips a listed
+    # model a built-in row already covers. "model" is set only when the person
+    # or the server chose one, so a /model choice saved in ~/.claude/settings.json
+    # holds otherwise.
+    settings = {"modelPicker": {"options": options, "replaceBuiltInOptions": False}}
+    if default_model:
+        settings = {"model": default_model, **settings}
     json.dump(
-        {
-            "model": default_model,
-            "modelPicker": {
-                "options": options,
-                "replaceBuiltInOptions": True,
-            },
-        },
+        settings,
         sys.stdout,
         ensure_ascii=False,
         indent=2,
@@ -131,5 +288,5 @@ if __name__ == "__main__":
     try:
         main()
     except DiscoveryError as error:
-        print(f"claudepro: {error}", file=sys.stderr)
+        print(f"{harness['name']}: {error}", file=sys.stderr)
         sys.exit(1)

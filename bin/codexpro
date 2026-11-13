@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# codexpro: Codex CLI through a CLIProxyAPI server, GPT models first.
+# install.sh copies this file to ~/.local/bin/codexpro.
+#
+# It reads the same url and key files as claudepro (~/.config/claudepro/) and
+# the same CLAUDEPRO_BASE_URL and CLAUDEPRO_AUTH_TOKEN overrides. CODEXPRO_MODEL
+# picks a model for one run, and the server can pin one with a
+# codexpro-default.<model> alias; otherwise Codex starts on its own default. Codex keeps its config, sessions and logs in
+# ~/.local/share/claudepro/codex-home, apart from ~/.codex.
+set -u
+
+dir="$HOME/.local/share/claudepro"
+config="$HOME/.config/claudepro"
+
+if [ -z "${CLAUDEPRO_BASE_URL:-}" ]; then
+    CLAUDEPRO_BASE_URL=$(cat "$config/url" 2>/dev/null) || {
+        echo "codexpro: cannot read $config/url; run the installer again" >&2
+        exit 1
+    }
+fi
+if [ -z "${CLAUDEPRO_AUTH_TOKEN:-}" ]; then
+    CLAUDEPRO_AUTH_TOKEN=$(cat "$config/key" 2>/dev/null) || {
+        echo "codexpro: cannot read $config/key; run the installer again" >&2
+        exit 1
+    }
+fi
+CLAUDEPRO_BASE_URL=${CLAUDEPRO_BASE_URL%/}
+export CLAUDEPRO_BASE_URL CLAUDEPRO_AUTH_TOKEN
+
+command -v codex >/dev/null || {
+    echo 'codexpro: Codex CLI (codex) is not installed; see https://github.com/openai/codex' >&2
+    exit 1
+}
+
+export CODEX_HOME="$dir/codex-home"
+mkdir -p "$CODEX_HOME" || exit 1
+
+# /model lists the server's models from models.json, built on the entries of
+# the Codex version installed.
+codex debug models --bundled >"$CODEX_HOME/bundled-models.json" 2>/dev/null || {
+    echo 'codexpro: `codex debug models --bundled` failed; update Codex CLI' >&2
+    exit 1
+}
+generated=$(python3 "$dir/claudepro-settings" --codex "$CODEX_HOME/bundled-models.json" "$CODEX_HOME/models.json") || exit $?
+model=$(printf '%s' "$generated" | python3 -c 'import json,sys; print(json.load(sys.stdin)["model"] or "")') || exit 1
+pick=()
+[ -z "$model" ] || pick=(-c "model=\"$model\"")
+
+# Codex sends CLAUDEPRO_AUTH_TOKEN as the bearer token (env_key). These run in
+# front of any subcommand, so `codexpro exec ...` and `codexpro resume` get them
+# too. The model passed is the one Codex itself would start on (or
+# CODEXPRO_MODEL, or the server's alias), and none once /model saved a choice in
+# codex-home/config.toml; -m on the command line still picks another.
+exec codex \
+    -c model_provider=claudepro \
+    -c "model_providers.claudepro={name=\"claudepro\", base_url=\"$CLAUDEPRO_BASE_URL/v1\", env_key=\"CLAUDEPRO_AUTH_TOKEN\", wire_api=\"responses\"}" \
+    ${pick[@]+"${pick[@]}"} \
+    -c "model_catalog_json='$CODEX_HOME/models.json'" \
+    -c approval_policy=never \
+    -c sandbox_mode=danger-full-access \
+    "$@"

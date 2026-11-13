@@ -4,8 +4,8 @@
 #
 # The server URL is in ~/.config/claudepro/url and the API key in
 # ~/.config/claudepro/key. CLAUDEPRO_BASE_URL and CLAUDEPRO_AUTH_TOKEN override
-# them, and CLAUDEPRO_MODEL picks a model for one run. The server sets the
-# default model with a claudepro-default.<model> alias.
+# them, and CLAUDEPRO_MODEL picks a model for one run. The server can pin a
+# model with a claudepro-default.<model> alias; otherwise none is pinned.
 set -u
 
 for arg in "$@"; do
@@ -35,16 +35,26 @@ fi
 export CLAUDEPRO_BASE_URL CLAUDEPRO_AUTH_TOKEN
 
 generated=$(python3 "$dir/claudepro-settings") || exit $?
-model=$(printf '%s' "$generated" | python3 -c 'import json,sys; print(json.load(sys.stdin)["model"])') || exit 1
+model=$(printf '%s' "$generated" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("model", ""))') || exit 1
 
-# One file per model, kept after exit: background jobs read it again later.
-settings_file="$dir/settings-${model//[^A-Za-z0-9._-]/_}.json"
+# One file per pinned model (settings-default.json when none), kept after exit:
+# background jobs read it again later.
+name=${model:-default}
+settings_file="$dir/settings-${name//[^A-Za-z0-9._-]/_}.json"
 printf '%s\n' "$generated" > "$settings_file.tmp" && mv "$settings_file.tmp" "$settings_file" || exit 1
 
 export ANTHROPIC_BASE_URL="$CLAUDEPRO_BASE_URL"
 export ANTHROPIC_AUTH_TOKEN="$CLAUDEPRO_AUTH_TOKEN"
 unset ANTHROPIC_API_KEY
-export ANTHROPIC_MODEL="$model"
-export CLAUDE_CODE_SUBAGENT_MODEL="$model"
+# No model is pinned unless CLAUDEPRO_MODEL or the server's alias names one:
+# Claude Code then starts on its own default or the /model choice saved in
+# ~/.claude/settings.json, and subagents pick their own. Values left over from a
+# claudepro session this one was started from are cleared too.
+unset CLAUDE_CODE_SUBAGENT_MODEL
+if [ -n "$model" ]; then
+    export ANTHROPIC_MODEL="$model"
+else
+    unset ANTHROPIC_MODEL
+fi
 
-exec claude --dangerously-skip-permissions --settings "$settings_file" --plugin-dir "$dir/quota-mod" "$@"
+exec claude --dangerously-skip-permissions --settings "$settings_file" --plugin-dir "$dir/quota-mod" --plugin-dir "$dir/image-mod" "$@"
