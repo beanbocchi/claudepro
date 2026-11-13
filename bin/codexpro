@@ -51,9 +51,15 @@ pick=()
 # too. The model passed is the one Codex itself would start on (or
 # CODEXPRO_MODEL, or the server's alias), and none once /model saved a choice in
 # codex-home/config.toml; -m on the command line still picks another.
+#
+# Codex offers its built-in image_gen tool only to a ChatGPT login or to a
+# provider that sends x-openai-actor-authorization (image_generation_available
+# in codex-rs/core/src/tools/spec_plan.rs). The tool posts to the provider's
+# /images/generations and /images/edits, which the server serves, so the header
+# turns it on; without it Codex asks for an OPENAI_API_KEY instead.
 exec codex \
     -c model_provider=claudepro \
-    -c "model_providers.claudepro={name=\"claudepro\", base_url=\"$CLAUDEPRO_BASE_URL/v1\", env_key=\"CLAUDEPRO_AUTH_TOKEN\", wire_api=\"responses\"}" \
+    -c "model_providers.claudepro={name=\"claudepro\", base_url=\"$CLAUDEPRO_BASE_URL/v1\", env_key=\"CLAUDEPRO_AUTH_TOKEN\", wire_api=\"responses\", http_headers={\"x-openai-actor-authorization\"=\"claudepro\"}}" \
     ${pick[@]+"${pick[@]}"} \
     -c "model_catalog_json='$CODEX_HOME/models.json'" \
     -c approval_policy=never \

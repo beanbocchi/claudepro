@@ -31,6 +31,14 @@ class Fake(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(answer).encode())
 
+    def do_GET(self):
+        ids = ["gpt-image-2", "claude-opus-5-5", "gpt-image-2.5-flare", "gpt-image-2.5", "gpt-6-luna", "gpt-image-1.5"]
+        body = json.dumps({"data": [{"id": i} for i in ids]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *args):
         pass
 
@@ -51,12 +59,25 @@ class ImagegenTest(unittest.TestCase):
         Fake.status = 200
         self.dir = tempfile.mkdtemp()
 
-    def run_script(self, request, **env):
+    def run_script(self, request, *args, **env):
         environ = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
         environ.update({"ANTHROPIC_BASE_URL": self.base, "ANTHROPIC_AUTH_TOKEN": "sk-test"}, **env)
+        if isinstance(request, dict):
+            request = {"model": "gpt-image-2.5", **request}
         return subprocess.run(
-            [sys.executable, SCRIPT], input=json.dumps(request), capture_output=True, text=True, env=environ, cwd=self.dir
+            [sys.executable, SCRIPT, *args], input=json.dumps(request), capture_output=True, text=True, env=environ, cwd=self.dir
         )
+
+    def test_list_models_prints_image_models_newest_first(self):
+        ran = self.run_script("", "--list-models")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(json.loads(ran.stdout), ["gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2", "gpt-image-1.5"])
+
+    def test_missing_model_is_refused_before_any_request(self):
+        ran = self.run_script({"prompt": "a cat", "output_path": "cat.png", "model": ""})
+        self.assertEqual(ran.returncode, 1)
+        self.assertIn("model is empty", ran.stderr)
+        self.assertEqual(Fake.requests, [])
 
     def test_generation_posts_json_and_saves_the_png(self):
         ran = self.run_script({"prompt": "a cat", "output_path": "out/cat.png", "size": "1024x1024"})

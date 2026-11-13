@@ -178,6 +178,11 @@ $env:CLAUDEPRO_AUTH_TOKEN = $token
 # Codex sends CLAUDEPRO_AUTH_TOKEN as the bearer token (env_key). These run in
 # front of any subcommand, so `codexpro exec ...` and `codexpro resume` get them
 # too; -m on the command line still picks another model.
-$provider = "model_providers.claudepro={name=`"claudepro`", base_url=`"$baseUrl/v1`", env_key=`"CLAUDEPRO_AUTH_TOKEN`", wire_api=`"responses`"}"
+# Codex offers its built-in image_gen tool only to a ChatGPT login or to a
+# provider that sends x-openai-actor-authorization (image_generation_available
+# in codex-rs/core/src/tools/spec_plan.rs). The tool posts to the provider's
+# /images/generations and /images/edits, which the server serves, so the header
+# turns it on; without it Codex asks for an OPENAI_API_KEY instead.
+$provider = "model_providers.claudepro={name=`"claudepro`", base_url=`"$baseUrl/v1`", env_key=`"CLAUDEPRO_AUTH_TOKEN`", wire_api=`"responses`", http_headers={`"x-openai-actor-authorization`"=`"claudepro`"}}"
 & $codex.Source -c model_provider=claudepro -c $provider @pick -c "model_catalog_json='$catalogFile'" -c approval_policy=never -c sandbox_mode=danger-full-access @args
 exit $LASTEXITCODE

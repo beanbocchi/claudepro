@@ -36,7 +36,11 @@ codexpro exec "explain this repo"
 
 Neither asks for permissions: Claude Code runs with `--dangerously-skip-permissions`, Codex with `approval_policy=never` and `sandbox_mode=danger-full-access`.
 
-In `claudepro`, `/quota` shows the plan limits of the server's accounts. Ask for a picture and Claude calls the `generate_image` tool, which uses `gpt-image-2.5` on the server and can edit or follow reference images. The tool needs Python (`python3`, or `python` on Windows).
+In `claudepro`, `/quota` shows the plan limits of the server's accounts. Ask for a picture and Claude calls the `generate_image` tool, which draws it with one of the server's image models and can edit or follow reference images. The tool is there only when the server lists an image model, and it needs Python (`python3`, or `python` on Windows).
+
+The first time, Claude asks which image model to use, and that model becomes the default for every later session. `/modelimg` shows the image models and the default, and `/modelimg <model>` changes it; asking Claude in chat ("use gpt-image-2 from now on") works too. Naming a model in a request uses it for that picture only. In `claudepro -p`, with nobody to ask, a session without a default uses the newest image model.
+
+In `codexpro`, Codex's own image tool draws pictures through the server, with no `OPENAI_API_KEY`. Codex picks the image model itself (`gpt-image-2`), so `/modelimg` applies to `claudepro` only.
 
 ## Models
 
