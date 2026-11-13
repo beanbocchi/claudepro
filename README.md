@@ -21,7 +21,9 @@ Windows, from PowerShell:
 irm https://raw.githubusercontent.com/beanbocchi/agentpro/main/install.ps1 | iex
 ```
 
-The installer asks for the key and checks it against the server before writing anything. It installs Claude Code if `claude` is missing; `codexpro` needs Codex CLI, which you install yourself. Run the installer again to update; it reuses the saved key. `CLAUDEPRO_KEY`, and `CLAUDEPRO_URL` for another server, skip the prompt.
+The installer asks for the key and checks it against the server before writing anything. It installs Claude Code if `claude` is missing; `codexpro` needs Codex CLI, which you install yourself. `CLAUDEPRO_KEY`, and `CLAUDEPRO_URL` for another server, skip the prompt.
+
+agentpro updates itself. At each start, `claudepro` and `codexpro` check GitHub in the background, at most once an hour, and install the newest commit on `main` with the saved key; the next start prints `agentpro: updated to <commit>`. To update at once, run the installer again. An install made from a clone of this repository does not update itself, and `AGENTPRO_NO_UPDATE=1` turns updates off for a run.
 
 The commands land in `~/.local/bin` on Linux and macOS, and in `%USERPROFILE%\.claudepro\bin` on Windows, which the installer adds to the user PATH.
 

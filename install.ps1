@@ -6,10 +6,12 @@
 # It asks for the API key, checks it against the server, and writes
 # %USERPROFILE%\.claudepro (url, key, launchers, /quota mod, image mod, bin\claudepro.cmd,
 # bin\codexpro.cmd, and bin\claudepro and bin\codexpro for Git Bash). It adds the bin folder to the user PATH and
-# installs Claude Code if `claude` is missing. Run it again to update. To remove
-# it, delete the folder and take its bin entry out of the user PATH.
+# installs Claude Code if `claude` is missing. Run it again to update; the
+# launchers also update themselves (agentpro-update.ps1). To remove it, delete
+# the folder and take its bin entry out of the user PATH.
 #
 # $env:CLAUDEPRO_KEY and $env:CLAUDEPRO_URL skip the prompt and the default server.
+# $env:AGENTPRO_REF installs that commit instead of the newest one on main.
 
 & {
     $ErrorActionPreference = 'Stop'
@@ -18,7 +20,11 @@
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
     $DefaultUrl = 'http://khoakomlem-internal.ddns.net:8317'
-    $Zip = 'https://codeload.github.com/beanbocchi/agentpro/zip/refs/heads/main'
+    # Overridable for tests only.
+    $Api = $env:AGENTPRO_API_URL
+    if (-not $Api) { $Api = 'https://api.github.com/repos/beanbocchi/agentpro' }
+    $Codeload = $env:AGENTPRO_CODELOAD_URL
+    if (-not $Codeload) { $Codeload = 'https://codeload.github.com/beanbocchi/agentpro' }
     $OnWindows = $env:OS -eq 'Windows_NT'
 
     $UserHome = $env:USERPROFILE
@@ -29,16 +35,27 @@
 
     function Fail($message) { throw "claudepro install: $message" }
 
-    # Use the files next to this script when run from a clone, else download them.
+    # Use the files next to this script when run from a clone, else download
+    # them. The version file records the commit, or "clone", which
+    # agentpro-update.ps1 leaves alone so it never overwrites work in progress.
     $src = $PSScriptRoot
+    $version = 'clone'
     $tmp = $null
     if (-not $src -or -not (Test-Path (Join-Path $src 'windows/claudepro.ps1'))) {
+        $ref = "$env:AGENTPRO_REF".Trim()
+        if (-not $ref) {
+            try { $ref = ([string](Invoke-RestMethod -Uri "$Api/commits/main" -Headers @{ Accept = 'application/vnd.github.sha' } -TimeoutSec 10)).Trim() } catch { $ref = '' }
+        }
+        if ($ref -match '^[0-9a-f]{40}$') { $version = $ref } else { $ref = 'main'; $version = 'unknown' }
         $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('claudepro-' + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $tmp | Out-Null
+        $zip = "$Codeload/zip/$ref"
         $zipFile = Join-Path $tmp 'src.zip'
-        try { Invoke-WebRequest -Uri $Zip -OutFile $zipFile -UseBasicParsing } catch { Fail "cannot download ${Zip}: $($_.Exception.Message)" }
-        Expand-Archive -Path $zipFile -DestinationPath $tmp
-        $src = Join-Path $tmp 'agentpro-main'
+        try { Invoke-WebRequest -Uri $zip -OutFile $zipFile -UseBasicParsing } catch { Fail "cannot download ${zip}: $($_.Exception.Message)" }
+        $unpacked = Join-Path $tmp 'src'
+        Expand-Archive -Path $zipFile -DestinationPath $unpacked
+        # The archive holds one folder, agentpro-<ref>.
+        $src = @(Get-ChildItem -Directory $unpacked)[0].FullName
     }
 
     try {
@@ -74,22 +91,27 @@
         [System.IO.File]::WriteAllText($keyFile, $key, $Utf8)
         Copy-Item -Force (Join-Path $src 'windows/claudepro.ps1') (Join-Path $Root 'claudepro.ps1')
         Copy-Item -Force (Join-Path $src 'windows/codexpro.ps1') (Join-Path $Root 'codexpro.ps1')
+        Copy-Item -Force (Join-Path $src 'windows/agentpro-update.ps1') (Join-Path $Root 'agentpro-update.ps1')
 
-        $mod = Join-Path $Root 'quota-mod'
-        if (Test-Path $mod) { Remove-Item -Recurse -Force $mod }
-        Copy-Item -Recurse (Join-Path $src 'quota-mod') $mod
-        $tests = Join-Path $mod 'tests'
-        if (Test-Path $tests) { Remove-Item -Recurse -Force $tests }
+        # Each mod is built beside the old one and swapped in, so a running
+        # session that reloads its plugin folders never finds one half copied.
         $quotaUrl = $env:CLAUDEPRO_QUOTA_URL
         if (-not $quotaUrl) { $u = [uri]$url; $quotaUrl = "$($u.Scheme)://$($u.Host):8318/quota" }
         $quota = [ordered]@{ url = $quotaUrl; keyFile = $keyFile } | ConvertTo-Json -Compress
-        [System.IO.File]::WriteAllText((Join-Path $mod 'quota.json'), $quota, $Utf8)
-
-        $imageMod = Join-Path $Root 'image-mod'
-        if (Test-Path $imageMod) { Remove-Item -Recurse -Force $imageMod }
-        Copy-Item -Recurse (Join-Path $src 'image-mod') $imageMod
-        $imageTests = Join-Path $imageMod 'tests'
-        if (Test-Path $imageTests) { Remove-Item -Recurse -Force $imageTests }
+        foreach ($name in 'image-mod', 'quota-mod') {
+            $mod = Join-Path $Root $name
+            $new = Join-Path $Root ".$name.new"
+            $old = Join-Path $Root ".$name.old"
+            foreach ($stale in $new, $old) { if (Test-Path $stale) { Remove-Item -Recurse -Force $stale } }
+            Copy-Item -Recurse (Join-Path $src $name) $new
+            $tests = Join-Path $new 'tests'
+            if (Test-Path $tests) { Remove-Item -Recurse -Force $tests }
+            if ($name -eq 'quota-mod') { [System.IO.File]::WriteAllText((Join-Path $new 'quota.json'), $quota, $Utf8) }
+            if (Test-Path $mod) { Move-Item $mod $old }
+            Move-Item $new $mod
+            if (Test-Path $old) { Remove-Item -Recurse -Force $old }
+        }
+        [System.IO.File]::WriteAllText((Join-Path $Root 'version'), $version, $Utf8)
 
         foreach ($name in 'claudepro', 'codexpro') {
             $launcher = Join-Path $Root "$name.ps1"

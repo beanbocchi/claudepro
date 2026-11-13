@@ -15,6 +15,25 @@ function Fail($message, $code = 1) {
     exit $code
 }
 
+# Report an update the last launch installed, then look for the next one in a
+# hidden background process (agentpro-update.ps1); this launch does not wait.
+$updatedFile = Join-Path $PSScriptRoot 'updated'
+if (Test-Path $updatedFile) {
+    $parts = @(([System.IO.File]::ReadAllText($updatedFile)).Trim() -split '\s+') + @('', '')
+    $short = $parts | ForEach-Object { if ($_.Length -gt 7) { $_.Substring(0, 7) } else { $_ } }
+    [Console]::Error.WriteLine("agentpro: updated to $($short[1]) (was $($short[0]))")
+    Remove-Item -Force $updatedFile
+}
+$updater = Join-Path $PSScriptRoot 'agentpro-update.ps1'
+if (Test-Path $updater) {
+    $start = @{
+        FilePath = (Get-Process -Id $PID).Path
+        ArgumentList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$updater`"")
+    }
+    if ($env:OS -eq 'Windows_NT') { $start.WindowStyle = 'Hidden' }
+    try { Start-Process @start | Out-Null } catch { }
+}
+
 foreach ($arg in $args) {
     if ($arg -eq '--permission-mode' -or "$arg" -like '--permission-mode=*') {
         Fail 'permission mode is fixed to bypassPermissions' 2

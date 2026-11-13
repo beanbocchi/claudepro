@@ -20,6 +20,15 @@ done
 dir="$HOME/.local/share/claudepro"
 config="$HOME/.config/claudepro"
 
+# Report an update the last launch installed, then look for the next one in
+# the background (agentpro-update); this launch does not wait for it.
+if [ -f "$dir/updated" ]; then
+    read -r old new <"$dir/updated" || true
+    echo "agentpro: updated to ${new:0:7} (was ${old:0:7})" >&2
+    rm -f "$dir/updated"
+fi
+[ ! -x "$dir/agentpro-update" ] || ("$dir/agentpro-update" >/dev/null 2>&1 </dev/null &)
+
 if [ -z "${CLAUDEPRO_BASE_URL:-}" ]; then
     CLAUDEPRO_BASE_URL=$(cat "$config/url" 2>/dev/null) || {
         echo "claudepro: cannot read $config/url; run the installer again" >&2

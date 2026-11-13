@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# agentpro-update: brings an agentpro install up to the newest commit on main.
+# claudepro and codexpro start it in the background at each launch, so the
+# update lands for the next launch. install.sh copies it to
+# ~/.local/share/claudepro/agentpro-update.
+#
+# It asks GitHub at most once an hour, and does nothing when the install came
+# from a clone (version "clone") or AGENTPRO_NO_UPDATE is set. After an update
+# it leaves "<old> <new>" in the file "updated", which the next launch reports.
+set -u
+
+dir="$HOME/.local/share/claudepro"
+# Overridable for tests only.
+API=${AGENTPRO_API_URL:-https://api.github.com/repos/beanbocchi/agentpro}
+RAW=${AGENTPRO_RAW_URL:-https://raw.githubusercontent.com/beanbocchi/agentpro}
+
+[ -z "${AGENTPRO_NO_UPDATE:-}" ] || exit 0
+version=$(cat "$dir/version" 2>/dev/null) || version=unknown
+[ "$version" != clone ] || exit 0
+
+stamp="$dir/update-checked"
+if [ -f "$stamp" ] && [ -z "$(find "$stamp" -mmin +60 2>/dev/null)" ]; then
+    exit 0
+fi
+
+# One updater at a time; a lock older than 30 minutes is left over from a crash.
+lock="$dir/update.lock"
+if ! mkdir "$lock" 2>/dev/null; then
+    [ -n "$(find "$lock" -maxdepth 0 -mmin +30 2>/dev/null)" ] || exit 0
+    rm -rf "$lock"
+    mkdir "$lock" 2>/dev/null || exit 0
+fi
+tmp=''
+trap 'rm -rf "$lock" ${tmp:+"$tmp"}' EXIT
+touch "$stamp"
+
+latest=$(curl -fsS -m 10 -H 'Accept: application/vnd.github.sha' "$API/commits/main") || exit 0
+[[ $latest =~ ^[0-9a-f]{40}$ ]] || exit 0
+[ "$latest" != "$version" ] || exit 0
+
+exec >"$dir/update.log" 2>&1
+echo "agentpro-update: $version -> $latest ($(date))"
+tmp=$(mktemp -d)
+curl -fsS -m 30 -o "$tmp/install.sh" "$RAW/$latest/install.sh" || exit 1
+AGENTPRO_REF=$latest bash "$tmp/install.sh" </dev/null || exit 1
+printf '%s %s\n' "$version" "$latest" >"$dir/updated"
